@@ -3,8 +3,6 @@
 
 //#define DEBUG
 
-#include "Arduino.h"
-
 #ifdef ARDUINO_SAMD_VARIANT_COMPLIANCE
     #define SERIAL SerialUSB
 #else

@@ -1,5 +1,3 @@
-
-
 #ifndef __PN532_INTERFACE_H__
 #define __PN532_INTERFACE_H__
 
@@ -24,8 +22,7 @@
                                       b = (b & 0xCC) >> 2 | (b & 0x33) << 2; \
                                       b = (b & 0xAA) >> 1 | (b & 0x55) << 1
 
-class PN532Interface
-{
+class PN532Interface {
 public:
     virtual void begin() = 0;
     virtual void wakeup() = 0;

@@ -1,74 +1,57 @@
 
-#include "PN532/PN532_SPI/PN532_SPI.h"
-#include "PN532/PN532/PN532_debug.h"
-#include "Arduino.h"
+#include "PN532_SPI.h"
+#include "PN532_debug.h"
 
 #define STATUS_READ 2
 #define DATA_WRITE 1
 #define DATA_READ 3
 
-PN532_SPI::PN532_SPI(SPIClass &spi, uint8_t ss)
-{
+
+PN532_SPI::PN532_SPI(spi_inst_t *spi, int rx, int sck, int tx, int csn) {
     command = 0;
-    _spi = &spi;
-    _ss = ss;
+    _spi = spi;
+    _rx = rx;
+    _sck = sck;
+    _tx = tx;
+    _csn = csn;
 }
 
-void PN532_SPI::begin()
-{
-    pinMode(_ss, OUTPUT);
-
-    _spi->begin();
-    _spi->setDataMode(SPI_MODE0); // PN532 only supports mode0
-    _spi->setBitOrder(LSBFIRST);
-#if defined __SAM3X8E__
-    /** DUE spi library does not support SPI_CLOCK_DIV8 macro */
-    _spi->setClockDivider(42); // set clock 2MHz(max: 5MHz)
-#elif defined __SAMD21G18A__
-    /** M0 spi library does not support SPI_CLOCK_DIV8 macro */
-    _spi->setClockDivider(24); // set clock 2MHz(max: 5MHz)
-#else
-    _spi->setClockDivider(SPI_CLOCK_DIV8); // set clock 2MHz(max: 5MHz)
-#endif
+void PN532_SPI::begin() {
+    spi_init(_spi, 1000 * 5000); // 5Mhz
+    gpio_set_function(_rx, GPIO_FUNC_SPI);
+    gpio_set_function(_sck, GPIO_FUNC_SPI);
+    gpio_set_function(_tx, GPIO_FUNC_SPI);
+    gpio_set_function(_csn, GPIO_FUNC_SPI);
+    // Make the SPI pins available to picotool
+    bi_decl(bi_4pins_with_func(_rx, _tx, _sck, _csn, GPIO_FUNC_SPI));
 }
 
-void PN532_SPI::wakeup()
-{
-    digitalWrite(_ss, LOW);
-    delay(2);
-    digitalWrite(_ss, HIGH);
-}
-
-int8_t PN532_SPI::writeCommand(const uint8_t *header, uint8_t hlen, const uint8_t *body, uint8_t blen)
-{
+int8_t PN532_SPI::writeCommand(const uint8_t *header, uint8_t hlen, const uint8_t *body, uint8_t blen) {
     command = header[0];
     writeFrame(header, hlen, body, blen);
 
     uint8_t timeout = PN532_ACK_WAIT_TIME;
-    while (!isReady())
-    {
-        delay(1);
+    WRITE_BUFFER[0] = timeout;
+
+    while (!isReady()) {
+        sleep_ms(1);
         timeout--;
-        if (0 == timeout)
-        {
+        if (0 == timeout) {
             DMSG("Time out when waiting for ACK\n");
             return -2;
         }
     }
-    if (readAckFrame())
-    {
+    if (readAckFrame()) {
         DMSG("Invalid ACK\n");
         return PN532_INVALID_ACK;
     }
     return 0;
 }
 
-int16_t PN532_SPI::readResponse(uint8_t buf[], uint8_t len, uint16_t timeout)
-{
+int16_t PN532_SPI::readResponse(uint8_t buf[], uint8_t len, uint16_t timeout) {
     uint16_t time = 0;
-    while (!isReady())
-    {
-        delay(1);
+    while (!isReady()) {
+        sleep_ms(1);
         time++;
         if (time > timeout)
         {
@@ -76,20 +59,19 @@ int16_t PN532_SPI::readResponse(uint8_t buf[], uint8_t len, uint16_t timeout)
         }
     }
 
-    digitalWrite(_ss, LOW);
-    delay(1);
+    sleep_ms(1);
 
     int16_t result;
-    do
-    {
-        write(DATA_READ);
+    do {
+        uint8_t send[1] = {DATA_READ};
+        spi_write_blocking(_spi, send, sizeof(send));
+        uint8_t response[3];
+        spi_read_blocking(_spi, 0, response, sizeof(response));
 
-        if (0x00 != read() || // PREAMBLE
-            0x00 != read() || // STARTCODE1
-            0xFF != read()    // STARTCODE2
-        )
-        {
-
+        if (0x00 != response[0] || // PREAMBLE
+            0x00 != response[1] || // STARTCODE1
+            0xFF != response[2]    // STARTCODE2
+        ) {
             result = PN532_INVALID_FRAME;
             break;
         }
@@ -147,25 +129,17 @@ int16_t PN532_SPI::readResponse(uint8_t buf[], uint8_t len, uint16_t timeout)
         result = length;
     } while (0);
 
-    digitalWrite(_ss, HIGH);
-
     return result;
 }
 
-bool PN532_SPI::isReady()
-{
-    digitalWrite(_ss, LOW);
-
-    write(STATUS_READ);
-    uint8_t status = read() & 1;
-    digitalWrite(_ss, HIGH);
+bool PN532_SPI::isReady() {
+    uint8_t status = write_read(STATUS_READ) & 1;
     return status;
 }
 
-void PN532_SPI::writeFrame(const uint8_t *header, uint8_t hlen, const uint8_t *body, uint8_t blen)
-{
-    digitalWrite(_ss, LOW);
-    delay(2); // wake up PN532
+void PN532_SPI::writeFrame(const uint8_t *header, uint8_t hlen, const uint8_t *body, uint8_t blen) {
+    uint8_t data[] = {DATA_WRITE, PN532_PREAMBLE, PN532_STARTCODE1, PN532_STARTCODE2};
+    spi_write_blocking(_spi, data, sizeof(data));
 
     write(DATA_WRITE);
     write(PN532_PREAMBLE);
@@ -181,15 +155,13 @@ void PN532_SPI::writeFrame(const uint8_t *header, uint8_t hlen, const uint8_t *b
 
     DMSG("write: ");
 
-    for (uint8_t i = 0; i < hlen; i++)
-    {
+    for (uint8_t i = 0; i < hlen; i++) {
         write(header[i]);
         sum += header[i];
 
         DMSG_HEX(header[i]);
     }
-    for (uint8_t i = 0; i < blen; i++)
-    {
+    for (uint8_t i = 0; i < blen; i++) {
         write(body[i]);
         sum += body[i];
 
@@ -200,8 +172,6 @@ void PN532_SPI::writeFrame(const uint8_t *header, uint8_t hlen, const uint8_t *b
     write(checksum);
     write(PN532_POSTAMBLE);
 
-    digitalWrite(_ss, HIGH);
-
     DMSG('\n');
 }
 
@@ -211,16 +181,13 @@ int8_t PN532_SPI::readAckFrame()
 
     uint8_t ackBuf[sizeof(PN532_ACK)];
 
-    digitalWrite(_ss, LOW);
-    delay(1);
+    sleep_ms(1);
     write(DATA_READ);
 
     for (uint8_t i = 0; i < sizeof(PN532_ACK); i++)
     {
         ackBuf[i] = read();
     }
-
-    digitalWrite(_ss, HIGH);
 
     return memcmp(ackBuf, PN532_ACK, sizeof(PN532_ACK));
 }
